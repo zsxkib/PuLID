@@ -10,6 +10,9 @@ from PIL import Image
 from typing import List
 from einops import rearrange
 import time
+import base64
+import io
+import re
 
 from flux.cli import SamplingOptions
 from flux.sampling import denoise, get_noise, get_schedule, prepare, unpack, get_noise_batch
@@ -109,7 +112,8 @@ class Predictor(BasePredictor):
     @torch.inference_mode()
     def predict(
         self,
-        main_face_image: Path = Input(description="Upload an ID image for face generation"),
+        main_face_image: Path = Input(description="Upload an ID image for face generation", default=""),
+        main_face_base64: str = Input(description="Upload an ID image for face generation", default=""),
         prompt: str = Input(
             description="Enter a text prompt to guide image generation", default="portrait, color, cinematic"
         ),
@@ -149,7 +153,7 @@ class Predictor(BasePredictor):
             default=128,
         ),
         output_format: str = Input(
-            description="Choose the format of the output image", choices=["png", "jpg", "webp"], default="webp"
+            description="Choose the format of the output image", choices=["png", "jpg", "webp", "base64"], default="webp"
         ),
         output_quality: int = Input(
             description="Set the quality of the output image for jpg and webp (1-100)", ge=1, le=100, default=80
@@ -166,8 +170,15 @@ class Predictor(BasePredictor):
             seeds = [seed + i for i in range(num_outputs)]
         print(f"Using seeds: {seeds}")
 
-        # Load and preprocess the ID image
-        id_image_np = np.array(Image.open(str(main_face_image))) if main_face_image else None
+        if main_face_base64 != "":
+            # Remove data URL prefix if present
+            main_face_base64 = re.sub(r'^data:image/[a-z]+;base64,', '', main_face_base64)
+
+            # Load and preprocess the ID image
+            id_image_np = np.array(Image.open(io.BytesIO(base64.b64decode(main_face_base64))))
+
+        else:
+            id_image_np = np.array(Image.open(str(main_face_image))) if main_face_image else None
 
         # Generate the images
         generated_images, used_seeds, _ = self.generate_image(
@@ -188,23 +199,34 @@ class Predictor(BasePredictor):
         )
 
         output_paths = []
-        for i, (generated_image, used_seed) in enumerate(zip(generated_images, used_seeds)):
-            # Save the generated image
-            output_path = f"output_{i+1}.{output_format}"
-            save_params = {"format": output_format.upper()}
-            if output_format in ["jpg", "webp"]:
-                save_params["quality"] = output_quality
-                if output_format == "jpg":
-                    save_params["optimize"] = True
+        if output_format != "base64":
+            
+            for i, (generated_image, used_seed) in enumerate(zip(generated_images, used_seeds)):
+                # Save the generated image
+                output_path = f"output_{i+1}.{output_format}"
+                save_params = {"format": output_format.upper()}
+                if output_format in ["jpg", "webp"]:
+                    save_params["quality"] = output_quality
+                    if output_format == "jpg":
+                        save_params["optimize"] = True
 
-            generated_image.save(output_path, **save_params)
-            output_paths.append(Path(output_path))
+                generated_image.save(output_path, **save_params)
+                output_paths.append(Path(output_path))
 
-            print(f"Image {i+1} generated with seed: {used_seed}")
+                print(f"Image {i+1} generated with seed: {used_seed}")
 
-        end_time = time.time()
-        print(f"Total prediction time: {end_time - start_time:.2f} seconds")
-        return output_paths
+            end_time = time.time()
+            print(f"Total prediction time: {end_time - start_time:.2f} seconds")
+            return output_paths
+        else:
+            output_base64 = []
+            for i, (generated_image, used_seed) in enumerate(zip(generated_images, used_seeds)):
+
+                buffered = io.BytesIO()
+                generated_image.save(buffered, format="PNG")
+                img_base64 = base64.b64encode(buffered.getvalue()).decode('utf-8')
+                output_base64.append(img_base64)
+            return output_base64
 
     def generate_image(
         self,
